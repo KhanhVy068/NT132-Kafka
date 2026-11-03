@@ -1,7 +1,7 @@
 # Tạo các hàm chung để khởi tạo Producer, Consumer, mã hóa và giải mã Message.
 import json
 
-from confluent_kafka import Producer, Consumer
+from confluent_kafka import Producer, Consumer, KafkaException
 
 from config.kafka_config import (
     PRODUCER_CONFIG,
@@ -15,8 +15,21 @@ def create_producer():
 
 
 # 2. Tạo Kafka Consumer
-def create_consumer(group_id):
-    return Consumer(get_consumer_config(group_id))
+def create_consumer(group_id, *, config_overrides=None):
+    """Allow services to require manual offsets without changing TV3 defaults."""
+    config = get_consumer_config(group_id)
+    if config_overrides:
+        config.update(config_overrides)
+    return Consumer(config)
+
+
+def commit_message(consumer, message):
+    """Commit synchronously and surface partition-specific failures to the loop."""
+    partitions = consumer.commit(message=message, asynchronous=False)
+    for partition in partitions or []:
+        if partition.error is not None:
+            raise KafkaException(partition.error)
+    return partitions
 
 
 # 3. Mã hóa Event thành JSON bytes

@@ -35,11 +35,21 @@ def inventory_result(order_id, product_id, success):
 
 
 # 3. Inventory Service - thay đổi tồn kho
-def stock_updated(product_id, stock_after):
-    return create_event("StockUpdated", {
+def stock_updated(product_id, stock_after, version=None):
+    """Accept an explicit Inventory version; preserve legacy two-argument callers.
+
+    Stock View requires versioned events. Omitting it only preserves the TV3
+    API until Inventory passes its transactionally generated product version.
+    """
+    data = {
         "product_id": product_id,
         "stock_after": stock_after
-    })
+    }
+    if version is not None:
+        if type(version) is not int or not 0 <= version <= 9223372036854775807:
+            raise ValueError("version must be a non-negative PostgreSQL BIGINT")
+        data["version"] = version
+    return create_event("StockUpdated", data)
 
 
 # 4. Payment Service

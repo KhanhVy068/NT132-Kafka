@@ -3,3 +3,10 @@
 __pycache__/
 *.pyc
 *.db
+.env.*
+!.env.example
+.pytest_cache/
+.coverage
+coverage.xml
+reports/
+data/
