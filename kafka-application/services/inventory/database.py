@@ -85,31 +85,46 @@ def get_reservation(conn, order_id):
     ).fetchone()
 
 
+
 def seed_product(conn, product_id, stock):
-    """Chỉ thêm sản phẩm chưa tồn tại."""
-    if not product_id:
-        raise ValueError("product_id không được rỗng")
+    """
+    Thêm sản phẩm mới:
+    - stock ban đầu
+    - version = 0
+    - ghi StockUpdated vào Outbox
+
+    Không ghi đè sản phẩm đã tồn tại.
+    """
+    if not isinstance(product_id, str) or not product_id.strip():
+        raise ValueError("product_id không hợp lệ")
 
     if type(stock) is not int or stock < 0:
         raise ValueError("stock phải là số nguyên không âm")
 
     with conn.transaction():
-        row = conn.execute(
+        product = conn.execute(
             """
-            INSERT INTO products (product_id, stock)
-            VALUES (%s, %s)
+            INSERT INTO products (
+                product_id, stock, version
+            )
+            VALUES (%s, %s, 0)
             ON CONFLICT (product_id) DO NOTHING
-            RETURNING product_id
+            RETURNING product_id, stock, version
             """,
             (product_id, stock),
         ).fetchone()
 
-        if row is None:
+        if product is None:
             return False
 
-        # Đồng bộ trạng thái tồn kho ban đầu qua Kafka
-        event = stock_updated(product_id, stock)
+        # Tạo Event với version ban đầu = 0
+        event = stock_updated(
+            product_id=product["product_id"],
+            stock_after=product["stock"],
+            version=product["version"],
+        )
 
+        # Ghi Outbox trong cùng Transaction
         _add_outbox_event(
             conn,
             TOPIC_INVENTORY_UPDATED,
@@ -118,6 +133,7 @@ def seed_product(conn, product_id, stock):
         )
 
         return True
+
 
 def _lock_order(conn, order_id):
     """
@@ -210,7 +226,7 @@ def reserve_stock(conn, order_id, product_id, quantity):
             ).fetchone()
 
             if updated is None:
-                raise RuntimeError("Giữ hàng không thành công")
+                raise RuntimeError("Giữ hàng thất bại")
 
         # 6. Lưu kết quả xử lý đơn
         conn.execute(
@@ -237,8 +253,9 @@ def reserve_stock(conn, order_id, product_id, quantity):
         # 8. Nếu giữ hàng thành công thì lưu StockUpdated
         if success:
             stock_event = stock_updated(
-                product_id,
-                updated["stock"],
+                product_id=product_id,
+                stock_after=updated["stock"],
+                version=updated["version"],
             )
 
             _add_outbox_event(
@@ -311,7 +328,7 @@ def release_stock(conn, order_id):
         ).fetchone()
 
         if updated is None:
-            raise RuntimeError("Không tìm thấy sản phẩm")
+            raise RuntimeError("Sản phẩm không tồn tại")
 
         # 5. Đổi trạng thái Reservation
         conn.execute(
@@ -324,16 +341,17 @@ def release_stock(conn, order_id):
         )
 
         # 6. Ghi StockUpdated vào Outbox
-        event = stock_updated(
-            reservation["product_id"],
-            updated["stock"],
+        stock_event = stock_updated(
+            product_id=reservation["product_id"],
+            stock_after=updated["stock"],
+            version=updated["version"],
         )
 
         _add_outbox_event(
             conn,
             TOPIC_INVENTORY_UPDATED,
             reservation["product_id"],
-            event,
+            stock_event,
         )
 
         return {
