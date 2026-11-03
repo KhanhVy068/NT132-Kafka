@@ -35,30 +35,28 @@ def inventory_result(order_id, product_id, success):
 
 
 # 3. Inventory Service - thay đổi tồn kho
-
 def stock_updated(product_id, stock_after, version):
-    from datetime import datetime, timezone
-    from uuid import uuid4
+    """Tạo StockUpdated có version bắt buộc."""
 
     if not isinstance(product_id, str) or not product_id.strip():
         raise ValueError("product_id không hợp lệ")
 
     if type(stock_after) is not int or stock_after < 0:
-        raise ValueError("stock_after không hợp lệ")
+        raise ValueError("stock_after phải là số nguyên không âm")
 
-    if type(version) is not int or version < 0:
-        raise ValueError("version không hợp lệ")
+    if (
+        type(version) is not int
+        or not 0 <= version <= 9223372036854775807
+    ):
+        raise ValueError(
+            "version phải là PostgreSQL BIGINT không âm"
+        )
 
-    return {
-        "event_id": str(uuid4()),
-        "event_type": "StockUpdated",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "data": {
-            "product_id": product_id,
-            "stock_after": stock_after,
-            "version": version,
-        },
-    }
+    return create_event("StockUpdated", {
+        "product_id": product_id,
+        "stock_after": stock_after,
+        "version": version
+    })
 
 
 
