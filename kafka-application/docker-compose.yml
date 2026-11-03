@@ -1,0 +1,82 @@
+name: nt132-kafka
+
+x-application: &application
+  build: .
+  image: nt132-kafka-app:tv4-v1
+  init: true
+
+x-kafka-environment: &kafka-environment
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-192.168.56.10:9092}
+  TOPIC_ORDERS: ${TOPIC_ORDERS:-orders.created}
+  TOPIC_INVENTORY_RESULTS: ${TOPIC_INVENTORY_RESULTS:-inventory.results}
+  TOPIC_INVENTORY_UPDATED: ${TOPIC_INVENTORY_UPDATED:-inventory.updated}
+  TOPIC_PAYMENTS_RESULTS: ${TOPIC_PAYMENTS_RESULTS:-payments.results}
+  GROUP_PAYMENT: ${GROUP_PAYMENT:-payment-group}
+  GROUP_NOTIFICATION: ${GROUP_NOTIFICATION:-notification-group}
+  GROUP_STOCK_VIEW: ${GROUP_STOCK_VIEW:-stock-view-group}
+  AUTO_OFFSET_RESET: ${AUTO_OFFSET_RESET:-earliest}
+  ENABLE_AUTO_COMMIT: "false"
+
+services:
+  payment:
+    <<: *application
+    command: ["python", "-m", "services.payment.consumer"]
+    environment:
+      <<: *kafka-environment
+      PAYMENT_MODE: ${PAYMENT_MODE:-random}
+      PAYMENT_SUCCESS_RATE: ${PAYMENT_SUCCESS_RATE:-0.9}
+      PAYMENT_SEED: ${PAYMENT_SEED:-nt132}
+      PAYMENT_DELIVERY_TIMEOUT: ${PAYMENT_DELIVERY_TIMEOUT:-15}
+
+  notification:
+    <<: *application
+    command: ["python", "-m", "services.notification.consumer"]
+    environment: *kafka-environment
+
+  stock-view:
+    <<: *application
+    command: ["python", "-m", "services.stock_view.consumer"]
+    environment:
+      <<: *kafka-environment
+      # Separate Docker variables avoid reusing Windows localhost settings.
+      STOCK_VIEW_DB_HOST: ${DOCKER_STOCK_VIEW_DB_HOST:-host.docker.internal}
+      STOCK_VIEW_DB_PORT: ${DOCKER_STOCK_VIEW_DB_PORT:-5432}
+      STOCK_VIEW_DB_NAME: ${STOCK_VIEW_DB_NAME:-stock_view_db}
+      STOCK_VIEW_DB_USER: ${STOCK_VIEW_DB_USER:-stock_view_user}
+      STOCK_VIEW_DB_PASSWORD: ${STOCK_VIEW_DB_PASSWORD:-}
+      # Names only, for the same separation guard used on Windows; no Inventory credentials.
+      INVENTORY_DB_NAME: ${INVENTORY_DB_NAME:-inventory_db}
+      INVENTORY_DB_USER: ${INVENTORY_DB_USER:-inventory_user}
+
+  order:
+    <<: *application
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "services.order.producer"]
+    command: ["--help"]
+    environment: *kafka-environment
+
+  flash-sale:
+    <<: *application
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "load_testing.flash_sale"]
+    command: ["--help"]
+    environment: *kafka-environment
+
+  # Optional TV3 commands connect only to an existing Inventory database.
+  inventory:
+    <<: *application
+    profiles: ["inventory"]
+    command: ["python", "-m", "services.inventory.consumer"]
+    environment: &inventory-environment
+      <<: *kafka-environment
+      INVENTORY_DB_HOST: ${DOCKER_INVENTORY_DB_HOST:-host.docker.internal}
+      INVENTORY_DB_PORT: ${DOCKER_INVENTORY_DB_PORT:-5432}
+      INVENTORY_DB_NAME: ${INVENTORY_DB_NAME:-inventory_db}
+      INVENTORY_DB_USER: ${INVENTORY_DB_USER:-inventory_user}
+      INVENTORY_DB_PASSWORD: ${INVENTORY_DB_PASSWORD:-}
+
+  inventory-outbox:
+    <<: *application
+    profiles: ["inventory"]
+    command: ["python", "-m", "services.inventory.producer"]
+    environment: *inventory-environment

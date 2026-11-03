@@ -1,0 +1,35 @@
+# Opt-in local development PostgreSQL for Stock View only.
+# Use together with docker-compose.yml; existing volumes are preserved.
+services:
+  stock-view:
+    environment:
+      STOCK_VIEW_DB_HOST: stock-view-postgres
+      STOCK_VIEW_DB_PORT: "5432"
+    depends_on:
+      stock-view-postgres:
+        condition: service_healthy
+
+  stock-view-postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_USER: stock_view_admin
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: ${LOCAL_POSTGRES_ADMIN_PASSWORD:?Set LOCAL_POSTGRES_ADMIN_PASSWORD}
+      STOCK_VIEW_DB_NAME: ${STOCK_VIEW_DB_NAME:-stock_view_db}
+      STOCK_VIEW_DB_USER: ${STOCK_VIEW_DB_USER:-stock_view_user}
+      STOCK_VIEW_DB_PASSWORD: ${STOCK_VIEW_DB_PASSWORD:?Set STOCK_VIEW_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:${LOCAL_STOCK_VIEW_DB_PORT:-5433}:5432"
+    volumes:
+      - stock_view_postgres_data:/var/lib/postgresql/data
+      - ./docker/init-stock-view.sh:/docker-entrypoint-initdb.d/10-stock-view.sh:ro
+    healthcheck:
+      # Bootstrap's temporary server listens on the Unix socket only. Check TCP
+      # so service_healthy cannot pass before init scripts finish.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "stock_view_admin", "-d", "postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  stock_view_postgres_data:
