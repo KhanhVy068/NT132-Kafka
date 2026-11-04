@@ -1,0 +1,11 @@
+
+# Kafka benchmark outputs
+benchmark-results/
+**/benchmark-results/
+
+# Temporary logs
+*.log
+
+# Local environment configuration
+.env
+.env.local

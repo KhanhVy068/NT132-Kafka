@@ -1,0 +1,7 @@
+
+# Local Kafbat UI configuration
+.env
+.env.local
+
+# Temporary files
+*.log

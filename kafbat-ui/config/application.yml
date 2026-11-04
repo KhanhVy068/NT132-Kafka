@@ -1,0 +1,5 @@
+
+kafka:
+  clusters:
+    - name: nt132-kafka
+      bootstrapServers: ${KAFKA_BOOTSTRAP_SERVER}
