@@ -18,9 +18,8 @@ from services.stock_view.database import get_connection, import_events, process_
 
 
 def event(version=1, stock=9, event_id="event-1", product="P01"):
-    result = stock_updated(product, stock)
+    result = stock_updated(product, stock, version=version)
     result["event_id"] = event_id
-    result["data"]["version"] = version
     return result
 
 

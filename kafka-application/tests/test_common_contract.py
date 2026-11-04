@@ -31,7 +31,7 @@ class CommonContractTests(unittest.TestCase):
         self.assertEqual(stock_updated("P01", 9, version=42)["data"]["version"], 42)
 
     def test_invalid_version_is_rejected(self):
-        for version in (-1, True, 1.5, "2", 2**63):
+        for version in (None, -1, True, 1.5, "2", 2**63):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 stock_updated("P01", 10, version=version)
 

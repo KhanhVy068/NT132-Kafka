@@ -3,6 +3,9 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 
+_VERSION_UNSET = object()
+
+
 def create_event(event_type, data):
     """Cấu trúc chung của tất cả Event."""
     return {
@@ -35,8 +38,8 @@ def inventory_result(order_id, product_id, success):
 
 
 # 3. Inventory Service - thay đổi tồn kho
-def stock_updated(product_id, stock_after, version):
-    """Tạo StockUpdated có version bắt buộc."""
+def stock_updated(product_id, stock_after, version=_VERSION_UNSET):
+    """Giữ payload cũ khi caller không truyền version."""
 
     if not isinstance(product_id, str) or not product_id.strip():
         raise ValueError("product_id không hợp lệ")
@@ -44,19 +47,16 @@ def stock_updated(product_id, stock_after, version):
     if type(stock_after) is not int or stock_after < 0:
         raise ValueError("stock_after phải là số nguyên không âm")
 
-    if (
-        type(version) is not int
-        or not 0 <= version <= 9223372036854775807
-    ):
-        raise ValueError(
-            "version phải là PostgreSQL BIGINT không âm"
-        )
-
-    return create_event("StockUpdated", {
+    data = {
         "product_id": product_id,
         "stock_after": stock_after,
-        "version": version
-    })
+    }
+    if version is not _VERSION_UNSET:
+        if type(version) is not int or not 0 <= version <= 9223372036854775807:
+            raise ValueError("version phải là PostgreSQL BIGINT không âm")
+        data["version"] = version
+
+    return create_event("StockUpdated", data)
 
 
 

@@ -21,8 +21,7 @@ from services.stock_view.database import init_db, process_event
 
 
 def versioned_event(version, stock, event_id=None):
-    result = stock_updated("P01", stock)
-    result["data"]["version"] = version
+    result = stock_updated("P01", stock, version=version)
     if event_id is not None:
         result["event_id"] = event_id
     return result
