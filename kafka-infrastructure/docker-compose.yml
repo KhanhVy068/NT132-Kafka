@@ -1,0 +1,51 @@
+services:
+  kafka:
+    image: apache/kafka:${KAFKA_IMAGE_TAG:?Hãy đặt KAFKA_IMAGE_TAG trong .env}
+    container_name: nt132-kafka-broker
+    hostname: kafka
+    restart: unless-stopped
+    ports:
+      - "${KAFKA_PORT:?Hãy đặt KAFKA_PORT trong .env}:9092"
+    environment:
+      # Một node KRaft kết hợp Broker/Controller; chủ đích không dùng ZooKeeper.
+      KAFKA_NODE_ID: ${KAFKA_NODE_ID:?Hãy đặt KAFKA_NODE_ID trong .env}
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:${KAFKA_CONTROLLER_PORT:?Hãy đặt KAFKA_CONTROLLER_PORT trong .env},BROKER://:19092,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://kafka:19092,EXTERNAL://${KAFKA_ADVERTISED_HOST:?Hãy đặt KAFKA_ADVERTISED_HOST trong .env}:${KAFKA_PORT:?Hãy đặt KAFKA_PORT trong .env}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: ${KAFKA_NODE_ID:?Hãy đặt KAFKA_NODE_ID trong .env}@kafka:${KAFKA_CONTROLLER_PORT:?Hãy đặt KAFKA_CONTROLLER_PORT trong .env}
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+
+      # Cấu hình topic nội bộ an toàn cho một Broker.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_SHARE_COORDINATOR_STATE_TOPIC_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # Dữ liệu Kafka và metadata KRaft cùng được lưu trong volume bền vững.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:?Set KAFKA_CLUSTER_ID in .env}
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+    networks:
+      - kafka-network
+
+volumes:
+  kafka-data:
+    name: ${KAFKA_DATA_VOLUME:?Hãy đặt KAFKA_DATA_VOLUME trong .env}
+
+networks:
+  kafka-network:
+    name: ${KAFKA_DOCKER_NETWORK:?Hãy đặt KAFKA_DOCKER_NETWORK trong .env}
+    driver: bridge
