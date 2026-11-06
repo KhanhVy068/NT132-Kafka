@@ -2,12 +2,14 @@
 import argparse
 import json
 import logging
-import os
+import math
 import time
 from uuid import uuid4
 
 from dotenv import load_dotenv
 
+from common.event_validation import require_text, require_quantity
+from config.topics import TOPIC_ORDERS
 from common.event_schema import order_created
 from common.kafka_client import create_producer
 
@@ -16,33 +18,23 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-TOPIC_ORDERS = os.getenv("TOPIC_ORDERS", "orders.created")
 
 
 # 1. Tạo Event đơn hàng
 def create_order(product_id, quantity, order_id=None):
-    if not isinstance(product_id, str) or not product_id.strip():
-        raise ValueError("product_id không được rỗng")
-
-    if type(quantity) is not int or quantity <= 0:
-        raise ValueError("quantity phải là số nguyên dương")
-
+    require_text(product_id, "product_id", 50)
+    require_quantity(quantity)
     if order_id is None:
-        order_id = f"ORD-{uuid4().hex[:16]}"
-    elif not isinstance(order_id, str) or not order_id.strip():
-        raise ValueError("order_id không hợp lệ")
-
-    return order_created(
-        order_id=order_id,
-        product_id=product_id,
-        quantity=quantity,
-    )
+        order_id = f"ORD-{uuid4().hex}"
+    require_text(order_id, "order_id", 100)
+    return order_created(order_id, product_id, quantity)
 
 
 # 2. Gửi Event và chờ Kafka xác nhận
 def publish_order(producer, event, timeout=15.0):
-    if timeout <= 0:
-        raise ValueError("timeout phải lớn hơn 0")
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("timeout must be finite and positive")
 
     if event.get("event_type") != "OrderCreated":
         raise ValueError("Chỉ hỗ trợ OrderCreated")

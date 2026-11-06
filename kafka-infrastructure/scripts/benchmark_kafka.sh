@@ -3,7 +3,7 @@
 set -euo pipefail
 
 BOOTSTRAP_SERVER="${BOOTSTRAP_SERVER:-localhost:9092}"
-TOPIC="${BENCHMARK_TOPIC:-orders.created}"
+TOPIC="${BENCHMARK_TOPIC:?Set an isolated benchmark topic}"
 
 RECORD_SIZE="${RECORD_SIZE:-256}"
 THROUGHPUT="${THROUGHPUT:--1}"

@@ -11,6 +11,7 @@ x-kafka-environment: &kafka-environment
   TOPIC_INVENTORY_RESULTS: ${TOPIC_INVENTORY_RESULTS:-inventory.results}
   TOPIC_INVENTORY_UPDATED: ${TOPIC_INVENTORY_UPDATED:-inventory.updated}
   TOPIC_PAYMENTS_RESULTS: ${TOPIC_PAYMENTS_RESULTS:-payments.results}
+  GROUP_INVENTORY: ${GROUP_INVENTORY:-inventory-group}
   GROUP_PAYMENT: ${GROUP_PAYMENT:-payment-group}
   GROUP_NOTIFICATION: ${GROUP_NOTIFICATION:-notification-group}
   GROUP_STOCK_VIEW: ${GROUP_STOCK_VIEW:-stock-view-group}
@@ -27,11 +28,26 @@ services:
       PAYMENT_SUCCESS_RATE: ${PAYMENT_SUCCESS_RATE:-0.9}
       PAYMENT_SEED: ${PAYMENT_SEED:-nt132}
       PAYMENT_DELIVERY_TIMEOUT: ${PAYMENT_DELIVERY_TIMEOUT:-15}
+      PAYMENT_DB_HOST: ${DOCKER_PAYMENT_DB_HOST:-host.docker.internal}
+      PAYMENT_DB_PORT: ${DOCKER_PAYMENT_DB_PORT:-5432}
+      PAYMENT_DB_NAME: ${PAYMENT_DB_NAME:-payment_db}
+      PAYMENT_DB_USER: ${PAYMENT_DB_USER:-payment_user}
+      PAYMENT_DB_PASSWORD: ${PAYMENT_DB_PASSWORD:-}
+      INVENTORY_DB_NAME: ${INVENTORY_DB_NAME:-inventory_db}
+      STOCK_VIEW_DB_NAME: ${STOCK_VIEW_DB_NAME:-stock_view_db}
 
   notification:
     <<: *application
     command: ["python", "-m", "services.notification.consumer"]
-    environment: *kafka-environment
+    environment:
+      <<: *kafka-environment
+      NOTIFICATION_DB_HOST: ${DOCKER_NOTIFICATION_DB_HOST:-host.docker.internal}
+      NOTIFICATION_DB_PORT: ${DOCKER_NOTIFICATION_DB_PORT:-5432}
+      NOTIFICATION_DB_NAME: ${NOTIFICATION_DB_NAME:-notification_db}
+      NOTIFICATION_DB_USER: ${NOTIFICATION_DB_USER:-notification_user}
+      NOTIFICATION_DB_PASSWORD: ${NOTIFICATION_DB_PASSWORD:-}
+      INVENTORY_DB_NAME: ${INVENTORY_DB_NAME:-inventory_db}
+      STOCK_VIEW_DB_NAME: ${STOCK_VIEW_DB_NAME:-stock_view_db}
 
   stock-view:
     <<: *application

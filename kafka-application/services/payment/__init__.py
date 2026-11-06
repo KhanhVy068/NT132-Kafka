@@ -1,1 +1,1 @@
-"""Deterministic payment simulation; Inventory owns stock compensation."""
+"""PostgreSQL-backed immutable payment simulation decisions."""

@@ -1,80 +1,49 @@
 
 import logging
-import time
+import json
 
 from confluent_kafka import KafkaException
 
 from common.kafka_client import (
     create_consumer,
+    commit_message,
     deserialize_event,
 )
 from services.inventory.database import (
     get_connection,
     reserve_stock,
     release_stock,
+    record_message_error,
+)
+
+from config.kafka_config import GROUP_INVENTORY
+from config.topics import (
+    TOPIC_ORDERS,
+    TOPIC_PAYMENTS_RESULTS as TOPIC_PAYMENTS,
+)
+from common.service_database import require_idle
+from common.event_validation import (
+    InvalidEvent, require_envelope, require_text, require_quantity,
 )
 
 logger = logging.getLogger(__name__)
 
-TOPIC_ORDERS = "orders.created"
-TOPIC_PAYMENTS = "payments.results"
-GROUP_INVENTORY = "inventory-group"
-
 
 def validate_event(event, topic):
-    """
-    Kiểm tra cấu trúc Event trước khi
-    thực hiện thao tác PostgreSQL.
-    """
-    if not isinstance(event, dict):
-        raise ValueError("Event phải là JSON object")
-
-    event_id = event.get("event_id")
-    event_type = event.get("event_type")
-    data = event.get("data")
-
-    if not isinstance(event_id, str) or not event_id.strip():
-        raise ValueError("Thiếu event_id hợp lệ")
-
-    if not isinstance(data, dict):
-        raise ValueError("Thiếu data hợp lệ")
-
+    data = require_envelope(event)
+    require_text(data.get("order_id"), "order_id", 100)
     if topic == TOPIC_ORDERS:
-        if event_type != "OrderCreated":
-            raise ValueError("Event không khớp orders.created")
-
-        if (
-            not isinstance(data.get("order_id"), str)
-            or not data["order_id"].strip()
-        ):
-            raise ValueError("order_id không hợp lệ")
-
-        if (
-            not isinstance(data.get("product_id"), str)
-            or not data["product_id"].strip()
-        ):
-            raise ValueError("product_id không hợp lệ")
-
-        quantity = data.get("quantity")
-
-        if type(quantity) is not int or quantity <= 0:
-            raise ValueError("quantity phải là số nguyên dương")
-
+        if event.get("event_type") != "OrderCreated":
+            raise InvalidEvent("Expected OrderCreated")
+        require_text(data.get("product_id"), "product_id", 50)
+        require_quantity(data.get("quantity"))
     elif topic == TOPIC_PAYMENTS:
-        if event_type != "PaymentResult":
-            raise ValueError("Event không khớp payments.results")
-
-        if (
-            not isinstance(data.get("order_id"), str)
-            or not data["order_id"].strip()
-        ):
-            raise ValueError("order_id không hợp lệ")
-
+        if event.get("event_type") != "PaymentResult":
+            raise InvalidEvent("Expected PaymentResult")
         if type(data.get("success")) is not bool:
-            raise ValueError("success phải là boolean")
-
+            raise InvalidEvent("success must be boolean")
     else:
-        raise ValueError(f"Topic không được hỗ trợ: {topic}")
+        raise InvalidEvent("Unsupported topic")
 
 
 def process_event(conn, event, topic):
@@ -86,6 +55,7 @@ def process_event(conn, event, topic):
     - Nếu đã xử lý Event ID thì bỏ qua.
     - Không thực hiện Kafka Offset Commit ở đây.
     """
+    require_idle(conn)
     validate_event(event, topic)
 
     event_id = event["event_id"]
@@ -151,39 +121,27 @@ def process_event(conn, event, topic):
         }
 
 def consume_one_message(consumer, conn, message):
-    """
-    Xử lý một Kafka Message và commit Offset
-    sau khi PostgreSQL Transaction thành công.
-    """
     if message.error():
         raise KafkaException(message.error())
-
     topic = message.topic()
+    try:
+        if message.value() is None:
+            raise InvalidEvent("Tombstone is unsupported for business topics")
+        event = deserialize_event(message)
+        result = process_event(conn=conn, event=event, topic=topic)
+    except (InvalidEvent, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # process_event đã rollback trước khi tới đây.
+        # record_message_error chỉ return sau top-level COMMIT thành công.
+        record_message_error(conn, message, exc)
+        logger.error(
+            "Quarantined topic=%s partition=%s offset=%s error=%s",
+            topic, message.partition(), message.offset(), type(exc).__name__,
+        )
+        result = {"processed": False, "quarantined": True}
 
-    # Hàm có sẵn trong common/kafka_client.py
-    event = deserialize_event(message)
-
-    result = process_event(
-        conn=conn,
-        event=event,
-        topic=topic,
-    )
-
-    # Manual Commit: chỉ chạy sau khi
-    # PostgreSQL đã commit thành công.
-    consumer.commit(
-        message=message,
-        asynchronous=False,
-    )
-
-    logger.info(
-        "Committed Kafka offset: topic=%s "
-        "partition=%s offset=%s",
-        topic,
-        message.partition(),
-        message.offset(),
-    )
-
+    commit_message(consumer, message)
+    logger.info("Committed Kafka offset: topic=%s partition=%s offset=%s",
+                topic, message.partition(), message.offset())
     return result
 
 
@@ -201,15 +159,17 @@ def run_consumer(
     owns_consumer = consumer is None
     owns_conn = conn is None
 
-    if owns_consumer:
-        consumer = create_consumer(GROUP_INVENTORY)
-
-    if owns_conn:
-        conn = get_connection()
-
     count = 0
-
     try:
+        if owns_consumer:
+            consumer = create_consumer(
+                GROUP_INVENTORY,
+                config_overrides={"enable.auto.commit": False, "enable.auto.offset.store": False},
+            )
+
+        if owns_conn:
+            conn = get_connection()
+
         consumer.subscribe([
             TOPIC_ORDERS,
             TOPIC_PAYMENTS,
@@ -236,11 +196,12 @@ def run_consumer(
             count += 1
 
     finally:
-        if owns_consumer:
-            consumer.close()
-
-        if owns_conn:
-            conn.close()
+        try:
+            if owns_consumer and consumer is not None:
+                consumer.close()
+        finally:
+            if owns_conn and conn is not None:
+                conn.close()
 
 
 def main():

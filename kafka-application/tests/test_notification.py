@@ -7,7 +7,28 @@ from confluent_kafka import KafkaError, KafkaException
 from common.event_schema import payment_result
 from common.kafka_client import serialize_event
 from config.topics import TOPIC_PAYMENTS_RESULTS
-from services.notification.consumer import consume_one_message, process_event, run_consumer
+from services.notification.consumer import (
+    consume_one_message as _consume_one_message, process_event as _process_event,
+    run_consumer as _run_consumer,
+)
+
+
+_UNIT_CONN = object()
+
+
+def process_event(*args, **kwargs):
+    kwargs.setdefault("conn", _UNIT_CONN)
+    return _process_event(*args, **kwargs)
+
+
+def consume_one_message(*args, **kwargs):
+    kwargs.setdefault("conn", _UNIT_CONN)
+    return _consume_one_message(*args, **kwargs)
+
+
+def run_consumer(*args, **kwargs):
+    kwargs.setdefault("conn", _UNIT_CONN)
+    return _run_consumer(*args, **kwargs)
 
 
 class FakeMessage:
@@ -25,6 +46,19 @@ class FakeMessage:
 
 
 class NotificationTests(unittest.TestCase):
+    def setUp(self):
+        self.rows = {}
+        def store(conn, event):
+            order_id = event["data"]["order_id"]
+            created = order_id not in self.rows
+            if created:
+                self.rows[order_id] = event
+            return {"event_id": event["event_id"], "order_id": order_id,
+                    "success": event["data"]["success"], "created": created}
+        patcher = patch("services.notification.consumer.store_notification", side_effect=store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_logs_event_order_and_result_then_commits(self):
         event = payment_result("ORD-1", False)
         consumer = Mock()
@@ -52,12 +86,15 @@ class NotificationTests(unittest.TestCase):
                 consume_one_message(consumer, FakeMessage(payment_result("ORD-1", True)))
         consumer.commit.assert_not_called()
 
-    def test_replay_can_log_twice(self):
+    def test_replay_creates_one_notification(self):
         event = payment_result("ORD-1", True)
         with self.assertLogs("services.notification.consumer", level="INFO") as output:
-            process_event(event)
-            process_event(event)
-        self.assertEqual(len(output.output), 2)
+            first = process_event(event)
+            second = process_event(event)
+        self.assertTrue(first["created"])
+        self.assertFalse(second["created"])
+        self.assertEqual(len(self.rows), 1)
+        self.assertEqual(len(output.output), 1)
 
     def test_partition_commit_error_stops_loop_before_later_offsets(self):
         consumer = Mock()

@@ -1,9 +1,10 @@
-
+from contextlib import contextmanager
 import json
 import logging
 import time
 
 from common.kafka_client import create_producer
+from common.service_database import require_idle
 from services.inventory.database import (
     get_connection,
     get_pending_outbox,
@@ -17,6 +18,22 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def publisher_lock(conn):
+    """Hold the singleton lock until this dedicated connection closes.
+
+    Use only inside the connection context in run_publisher: producer flush must
+    finish before the session closes. A session lock is not a Kafka fencing token.
+    """
+    require_idle(conn)
+    row = conn.execute(
+        "SELECT pg_try_advisory_lock(%s, %s) AS acquired", (132, 1)
+    ).fetchone()
+    if not row["acquired"]:
+        raise RuntimeError("Another Inventory Outbox Publisher is active")
+    yield
 
 
 def publish_one_event(producer, event, timeout=15):
@@ -146,42 +163,26 @@ def publish_pending_events(conn, producer, limit=100):
 
 
 def run_publisher(interval=2):
-    """
-    Chạy Outbox Publisher liên tục.
-    Sử dụng ở giai đoạn 2 khi có Kafka.
-    """
-    logger.info("Starting Inventory Outbox Publisher")
-
+    if interval <= 0:
+        raise ValueError("interval must be positive")
     with get_connection() as conn:
-        producer = create_producer()
-
-        try:
-            while True:
-                count = publish_pending_events(
-                    conn,
-                    producer,
-                    limit=100,
-                )
-
-                if count:
-                    logger.info(
-                        "Published %s event(s)",
-                        count,
-                    )
-
-                time.sleep(interval)
-
-        except KeyboardInterrupt:
-            logger.info("Stopping Inventory Publisher")
-
-        finally:
-            remaining = producer.flush(10)
-
-            if remaining:
-                logger.warning(
-                    "%s Kafka Message chưa hoàn tất",
-                    remaining,
-                )
+        with publisher_lock(conn):
+            producer = create_producer()
+            try:
+                while True:
+                    # Cùng connection đang giữ lock, không dùng connection pool khác.
+                    conn.execute("SELECT 1")
+                    count = publish_pending_events(conn, producer, limit=100)
+                    if count:
+                        logger.info("Published %s event(s)", count)
+                    else:
+                        time.sleep(interval)
+            except KeyboardInterrupt:
+                logger.info("Stopping Inventory Publisher")
+            finally:
+                pending = producer.flush(10)
+                if pending:
+                    logger.warning("Stopped with %s unconfirmed events", pending)
 
 
 def main():

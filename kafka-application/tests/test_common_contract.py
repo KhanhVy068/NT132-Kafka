@@ -21,9 +21,11 @@ class CommonContractTests(unittest.TestCase):
         with self.assertRaises(KafkaException):
             commit_message(consumer, message)
 
-    def test_legacy_stock_factory_keeps_original_shape(self):
-        event = stock_updated("P01", 10)
-        self.assertEqual(event["data"], {"product_id": "P01", "stock_after": 10})
+    def test_stock_factory_requires_version(self):
+        with self.assertRaises(TypeError):
+            stock_updated("P01", 10)
+        event = stock_updated("P01", 10, version=0)
+        self.assertEqual(event["data"], {"product_id": "P01", "stock_after": 10, "version": 0})
         self.assertEqual(set(event), {"event_id", "event_type", "timestamp", "data"})
 
     def test_explicit_version_zero_is_preserved(self):

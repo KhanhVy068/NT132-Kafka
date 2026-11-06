@@ -1,120 +1,54 @@
+# Kafka infrastructure — VM1
 
-# Kafka Infrastructure - NT132
+`docker-compose.yml` chạy một official `apache/kafka:4.1.2` node KRaft combined broker/controller,
+với named volume `kafka_data`. Cấu hình tham khảo [Apache single-node example](https://github.com/apache/kafka/blob/4.1.2/docker/examples/docker-compose-files/single-node/plaintext/docker-compose.yml).
+Đây là topology lab RF=1, không có HA.
 
-## 1. Overview
+## Giai đoạn 1: chuẩn bị configuration
 
-This directory contains Kafka administration
-scripts for the NT132 e-commerce project.
+Copy `.env.example` thành `.env` chỉ khi chưa có. Đặt KAFKA_ADVERTISED_HOST thành IP/hostname
+VM1 truy cập được từ VM2. KAFKA_CLUSTER_ID phải ổn định với volume đã format; sample ID chỉ dùng
+cho cluster lab mới. Không đổi identity hoặc xóa volume để chữa startup failure.
 
-Responsibilities:
-- Initialize Kafka topics
-- Inspect topics and partitions
-- Monitor consumer groups and lag
-- Benchmark Kafka producer performance
+- EXTERNAL: VM1_IP:9092, cho Windows/VM2/Kafbat/application.
+- INTERNAL: kafka:19092, chỉ trong network Compose VM1.
+- CONTROLLER: kafka:9093, không publish ra host.
 
-## 2. Kafka Topics
+Sau khi được phép dùng Docker CLI, CMD có thể validate mà không khởi động container:
 
-| Topic | Partitions | Replication Factor |
-|---|---|---|
-| orders.created | 2 | 1 |
-| inventory.results | 2 | 1 |
-| payments.results | 2 | 1 |
-| inventory.updated | 2 | 1 |
-
-## 3. Requirements
-
-- Running Kafka Broker
-- Kafka CLI tools available
-- Network access to the Broker
-- Bash shell
-
-Set BOOTSTRAP_SERVER to the address reachable
-from the environment executing the scripts.
-
-Example:
-
-```bash
-export BOOTSTRAP_SERVER=localhost:9092
+```bat
+docker compose --env-file .env.example config --quiet
 ```
 
-Replace localhost with the actual Broker address
-when running remotely.
+Python unit parser tests từ `kafka-application`:
 
-## 4. Initialize Topics
-
-```bash
-bash topics/init_topics.sh
+```bat
+.venv\Scripts\python.exe -m unittest tests.test_topic_script -v
 ```
 
-The script creates missing topics and verifies
-their partition and replication settings.
+## Giai đoạn 2: deploy trên Ubuntu VM1
 
-## 5. List Topics
-
-```bash
-bash scripts/list_topics.sh
-```
-
-Displays:
-- Topic names
-- Partitions
-- Replication information
-
-## 6. Check Consumer Groups
+Chỉ chạy khi mạng/volume đã được kiểm tra và được phép triển khai:
 
 ```bash
-bash scripts/check_consumer_groups.sh
+docker compose up -d --wait --wait-timeout 180 kafka
+docker compose logs --tail 100 kafka
+docker compose exec -T kafka sh -c 'PATH=/opt/kafka/bin:$PATH BOOTSTRAP_SERVER=kafka:19092 bash /work/topics/init_topics.sh'
+docker compose exec -T kafka /opt/kafka/bin/kafka-metadata-quorum.sh --bootstrap-server kafka:19092 describe --status
 ```
 
-Displays:
-- Consumer group list
-- Current offsets
-- Log end offsets
-- Consumer lag
-- Consumer group members
+Bốn topic orders.created, inventory.results, payments.results, inventory.updated: 2 partitions, RF=1.
+Init có tính idempotent; parse giá trị chính xác, topic sai cấu hình thì exit khác 0; không tự xóa/sửa
+topic. Chạy init hai lần để nghiệm thu. Mở TCP 9092 trong mạng nội bộ để VM2 kết nối;
+client VM2 phải nhận metadata EXTERNAL là IP VM1, không phải localhost hay hostname container.
 
-## 7. Benchmark
+Các CLI scripts được mount read-only trong `/work/scripts`; chạy với PATH `/opt/kafka/bin` và
+BOOTSTRAP_SERVER=kafka:19092 như init ở trên. Từ host có Kafka CLI, đặt bootstrap VM1_IP:9092.
+`check_consumer_groups.sh` hiển thị offset/lag/member cho các group.
 
-Run only in an isolated Kafka test environment.
+Benchmark raw payload phải dùng topic test riêng đã provision, ví dụ BENCHMARK_TOPIC=broker.benchmark;
+script không còn mặc định ghi payload không đúng JSON contract vào orders.created. Benchmark Broker
+không thay thế Flash Sale đối soát ứng dụng. Không tự tạo topic benchmark ở môi trường đang dùng chung.
 
-```bash
-bash scripts/benchmark_kafka.sh
-```
-
-Test sizes:
-- 1,000 records
-- 10,000 records
-- 100,000 records
-
-Default record size: 256 bytes.
-
-Benchmark output is saved under
-benchmark-results/.
-
-The script measures producer performance.
-Consumer lag must be monitored separately.
-
-## 8. Integration
-
-Kafka infrastructure is deployed by TV1.
-
-Kafka application services are implemented
-by other team members.
-
-The actual bootstrap server address and
-Kafka CLI execution method must be agreed
-upon with TV1 before deployment.
-
-## 9. Project Status
-
-Phase 1:
-- Scripts prepared
-- Bash syntax validation required
-- Runtime Kafka testing pending
-
-Phase 2:
-- Kafka Broker deployment
-- Topic initialization
-- Consumer group monitoring
-- Benchmark execution
-- Result collection
+Nghiệm thu cần health, metadata từ VM2, topic/offset và data còn nguyên sau restart. Các bước runtime
+này chưa được chạy trong lượt sửa source. Xem [deploy hai VM](../docs/deployment-two-vms.md).

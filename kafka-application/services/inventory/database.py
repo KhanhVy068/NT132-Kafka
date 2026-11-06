@@ -1,6 +1,5 @@
 
 import os
-import json
 from pathlib import Path
 
 import psycopg
@@ -13,22 +12,11 @@ from common.event_schema import (
     stock_updated,
 )
 
+from config.topics import TOPIC_INVENTORY_RESULTS, TOPIC_INVENTORY_UPDATED
+from common.service_database import require_idle
+from common.event_validation import InvalidEvent, require_text, require_quantity, INT_MAX
+
 load_dotenv()
-
-TOPIC_INVENTORY_RESULTS = "inventory.results"
-TOPIC_INVENTORY_UPDATED = "inventory.updated"
-
-
-def get_connection():
-    """Kết nối PostgreSQL bằng biến môi trường."""
-    return psycopg.connect(
-        host=os.getenv("INVENTORY_DB_HOST", "localhost"),
-        port=int(os.getenv("INVENTORY_DB_PORT", "5432")),
-        dbname=os.getenv("INVENTORY_DB_NAME", "inventory_db"),
-        user=os.getenv("INVENTORY_DB_USER", "inventory_user"),
-        password=os.environ["INVENTORY_DB_PASSWORD"],
-        row_factory=dict_row,
-    )
 
 
 def init_db(conn):
@@ -85,7 +73,6 @@ def get_reservation(conn, order_id):
     ).fetchone()
 
 
-
 def seed_product(conn, product_id, stock):
     """
     Thêm sản phẩm mới:
@@ -95,11 +82,9 @@ def seed_product(conn, product_id, stock):
 
     Không ghi đè sản phẩm đã tồn tại.
     """
-    if not isinstance(product_id, str) or not product_id.strip():
-        raise ValueError("product_id không hợp lệ")
-
-    if type(stock) is not int or stock < 0:
-        raise ValueError("stock phải là số nguyên không âm")
+    require_text(product_id, "product_id", 50)
+    if type(stock) is not int or not 0 <= stock <= INT_MAX:
+        raise InvalidEvent("stock must be a nonnegative PostgreSQL INTEGER")
 
     with conn.transaction():
         product = conn.execute(
@@ -152,7 +137,6 @@ def _lock_order(conn, order_id):
     )
 
 
-
 def reserve_stock(conn, order_id, product_id, quantity):
     """
     Giữ hàng an toàn:
@@ -160,14 +144,9 @@ def reserve_stock(conn, order_id, product_id, quantity):
     - Không cho tồn kho âm
     - Ghi Reservation và Outbox cùng Transaction
     """
-    if not isinstance(order_id, str) or not order_id.strip():
-        raise ValueError("order_id không hợp lệ")
-
-    if not isinstance(product_id, str) or not product_id.strip():
-        raise ValueError("product_id không hợp lệ")
-
-    if type(quantity) is not int or quantity <= 0:
-        raise ValueError("quantity phải là số nguyên dương")
+    require_text(order_id, "order_id", 100)
+    require_text(product_id, "product_id", 50)
+    require_quantity(quantity)
 
     with conn.transaction():
         # 1. Khóa theo order_id trước
@@ -181,7 +160,7 @@ def reserve_stock(conn, order_id, product_id, quantity):
                 existing["product_id"] != product_id
                 or existing["quantity"] != quantity
             ):
-                raise ValueError(
+                raise InvalidEvent(
                     "order_id đã tồn tại với dữ liệu khác"
                 )
 
@@ -203,7 +182,7 @@ def reserve_stock(conn, order_id, product_id, quantity):
         ).fetchone()
 
         if product is None:
-            raise ValueError("Sản phẩm không tồn tại")
+            raise InvalidEvent("Sản phẩm không tồn tại")
 
         # 4. Kiểm tra đủ hàng hay không
         success = product["stock"] >= quantity
@@ -275,8 +254,6 @@ def reserve_stock(conn, order_id, product_id, quantity):
         }
 
 
-
-
 def release_stock(conn, order_id):
     """
     Hoàn trả hàng khi thanh toán thất bại.
@@ -284,8 +261,7 @@ def release_stock(conn, order_id):
     Chỉ RESERVED mới được hoàn trả.
     REJECTED và RELEASED không được cộng kho.
     """
-    if not isinstance(order_id, str) or not order_id.strip():
-        raise ValueError("order_id không hợp lệ")
+    require_text(order_id, "order_id", 100)
 
     with conn.transaction():
         # 1. Khóa theo order_id
@@ -303,7 +279,7 @@ def release_stock(conn, order_id):
         ).fetchone()
 
         if reservation is None:
-            raise ValueError("Không tìm thấy Reservation")
+            raise InvalidEvent("Không tìm thấy Reservation")
 
         # 3. Chống hoàn trả trùng
         if reservation["status"] != "RESERVED":
@@ -361,7 +337,6 @@ def release_stock(conn, order_id):
         }
 
 
-
 def get_pending_outbox(conn, limit=100):
     rows = conn.execute(
         """
@@ -401,3 +376,19 @@ def get_connection():
         row_factory=dict_row,
         autocommit=True,
     )
+
+
+def record_message_error(conn, message, error):
+    require_idle(conn)
+    with conn.transaction():
+        conn.execute(
+            """
+            INSERT INTO consumer_errors
+                (topic, partition_id, kafka_offset, message_key, raw_payload,
+                 error_class, error_message)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (topic, partition_id, kafka_offset) DO NOTHING
+            """,
+            (message.topic(), message.partition(), message.offset(),
+             message.key(), message.value(), type(error).__name__, str(error)),
+        )

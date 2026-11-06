@@ -1,111 +1,24 @@
+# Kafbat UI — VM2
 
-# Kafbat UI - NT132 Kafka Project
+Compose dùng default network do chính Compose tạo, không còn phụ thuộc external network từ máy cũ.
+Broker VM1 được truy cập qua IP/hostname EXTERNAL:9092; không cần Docker network chung giữa hai VM.
 
-## 1. Overview
+`.env.example` ghim v1.5.0 theo [release chính thức](https://github.com/kafbat/kafka-ui/releases/tag/v1.5.0).
+Tag này chưa được pull/chạy trong lượt sửa. KAFKA_BOOTSTRAP_SERVER phải là địa chỉ thật của VM1.
 
-Kafbat UI provides a web interface for monitoring
-and managing the Kafka infrastructure.
-
-Main features:
-- View Kafka Brokers and Topics
-- Inspect Partitions and Messages
-- Monitor Consumer Groups
-- Check Committed Offsets and Consumer Lag
-- Observe Consumer status
-
-## 2. Requirements
-
-- Docker Engine and Docker Compose
-- Kafka Broker deployed by TV1
-- Network connectivity to Kafka Broker
-
-## 3. Configuration
-
-Copy the environment template:
+Sau khi điền `.env` (chỉ copy khi chưa có), có thể validate:
 
 ```bash
-cp .env.example .env
+docker compose config --quiet
 ```
 
-Configure the following variables:
-
-- KAFBAT_VERSION: Kafbat UI image version
-- KAFBAT_UI_PORT: Web interface port
-- KAFKA_BOOTSTRAP_SERVER: Kafka Broker address
-
-The Kafka address must be reachable from VM2.
-
-## 4. Deployment
-
-Start Kafbat UI:
+Giai đoạn 2, khi được phép chạy:
 
 ```bash
 docker compose up -d
+docker compose logs --tail 100 kafbat-ui
 ```
 
-Check container status:
-
-```bash
-docker compose ps
-```
-
-View logs:
-
-```bash
-docker compose logs -f
-```
-
-Stop Kafbat UI:
-
-```bash
-docker compose down
-```
-
-## 5. Access
-
-Open the browser:
-
-http://localhost:8080
-
-When accessing from another machine, replace
-localhost with the IP address of VM2.
-
-Do not expose the administration interface
-directly to the public Internet.
-
-## 6. Monitoring
-
-Use the Kafbat UI interface to inspect:
-
-- orders.created
-- inventory.results
-- payments.results
-- inventory.updated
-
-Check Consumer Group offsets and lag during UC1.
-
-Observe Kafka metrics during UC2.
-
-## 7. Troubleshooting
-
-### Cannot connect to Kafka
-
-Check:
-- Kafka Broker is running
-- Bootstrap Server IP and port
-- Kafka advertised.listeners configuration
-- Firewall and VM network connectivity
-
-### Web UI is unavailable
-
-Check:
-- Docker container status
-- Port 8080 availability
-- Container logs
-
-## 8. Current Status
-
-Configuration prepared for Phase 1.
-
-Runtime deployment and integration testing
-will be performed in Phase 2.
+Mở http://VM2_IP:8080. PASS khi UI truy vấn được Broker, bốn topic và group lag; chỉ trang web load
+được chưa chứng minh kết nối Kafka. Nếu timeout, kiểm tra VM1 firewall, bootstrap, advertised listeners.
+Interface quản trị chỉ dùng mạng lab nội bộ. Không có lệnh tạo external network thủ công cần chạy.

@@ -44,3 +44,15 @@ CREATE TABLE IF NOT EXISTS outbox_events (
 CREATE INDEX IF NOT EXISTS idx_outbox_pending
 ON outbox_events (id)
 WHERE published_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS consumer_errors (
+    topic TEXT NOT NULL,
+    partition_id INTEGER NOT NULL,
+    kafka_offset BIGINT NOT NULL CHECK (kafka_offset >= 0),
+    message_key BYTEA,
+    raw_payload BYTEA,
+    error_class TEXT NOT NULL,
+    error_message TEXT NOT NULL,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (topic, partition_id, kafka_offset)
+);

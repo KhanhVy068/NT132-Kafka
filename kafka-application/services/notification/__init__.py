@@ -1,1 +1,1 @@
-"""Payment logging consumer. Replays can produce duplicate log records."""
+"""Durable in-app payment notifications, deduplicated by event and order."""

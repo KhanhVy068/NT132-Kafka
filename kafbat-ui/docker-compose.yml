@@ -1,20 +1,12 @@
-
+name: nt132-kafbat
 services:
   kafbat-ui:
     image: ghcr.io/kafbat/kafka-ui:${KAFBAT_VERSION:?Set KAFBAT_VERSION}
-    container_name: kafbat-ui
     ports:
       - "${KAFBAT_UI_PORT:-8080}:8080"
     environment:
       SPRING_CONFIG_ADDITIONAL_LOCATION: file:/config/application.yml
-      KAFKA_BOOTSTRAP_SERVER: ${KAFKA_BOOTSTRAP_SERVER:?Set KAFKA_BOOTSTRAP_SERVER}
+      KAFKA_BOOTSTRAP_SERVER: ${KAFKA_BOOTSTRAP_SERVER:?Set VM1 bootstrap address}
     volumes:
       - ./config/application.yml:/config/application.yml:ro
     restart: unless-stopped
-    networks:
-      - kafka-local
-
-networks:
-  kafka-local:
-    external: true
-    name: kafka-local-test_default

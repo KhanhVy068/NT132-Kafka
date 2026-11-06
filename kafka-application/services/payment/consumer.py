@@ -1,14 +1,13 @@
-"""InventoryResult -> deterministic simulated PaymentResult, at least once."""
+"""Persist an immutable payment decision, publish it, then commit the source offset."""
 
-from datetime import datetime
 import hashlib
 import json
 import logging
-from uuid import NAMESPACE_URL, uuid5
 
 from confluent_kafka import KafkaException
 
-from common.event_schema import payment_result
+from common.event_validation import require_envelope, require_text
+from services.payment.database import get_connection, load_or_create_decision
 from common.kafka_client import commit_message, create_consumer, create_producer, deserialize_event
 from config.kafka_config import GROUP_PAYMENT
 from config.topics import TOPIC_INVENTORY_RESULTS
@@ -34,92 +33,76 @@ def simulate_payment(order_id, settings):
 
 
 def validate_event(event):
-    if not isinstance(event, dict) or event.get("event_type") != "InventoryResult":
+    data = require_envelope(event)
+    if event.get("event_type") != "InventoryResult":
         raise ValueError("Payment expects InventoryResult")
-    if not isinstance(event.get("event_id"), str) or not event["event_id"].strip():
-        raise ValueError("InventoryResult requires event_id")
-    timestamp = event.get("timestamp")
-    if not isinstance(timestamp, str):
-        raise ValueError("InventoryResult requires timestamp")
-    try:
-        parsed = datetime.fromisoformat(timestamp)
-    except ValueError as exc:
-        raise ValueError("InventoryResult timestamp must be ISO 8601") from exc
-    if parsed.tzinfo is None:
-        raise ValueError("InventoryResult timestamp must include a timezone")
-    data = event.get("data")
-    if not isinstance(data, dict):
-        raise ValueError("InventoryResult requires data")
-    if not isinstance(data.get("order_id"), str) or not data["order_id"].strip():
-        raise ValueError("InventoryResult requires order_id")
+    require_text(data.get("order_id"), "order_id", 100)
+    require_text(data.get("product_id"), "product_id", 50)
     if type(data.get("success")) is not bool:
         raise ValueError("InventoryResult.success must be boolean")
 
 
-def process_event(producer, event, settings=None):
-    """Pure decision plus injected publisher; Kafka offsets belong to the caller."""
+def process_event(producer, event, settings=None, *, conn):
     validate_event(event)
     settings = settings if settings is not None else PaymentSettings.from_env()
-    data = event["data"]
-    if not data["success"]:
-        logger.info("Inventory rejected order_id=%s; payment skipped", data["order_id"])
+    if not event["data"]["success"]:
         return {"skipped": True, "payment_event": None}
-
-    order_id = data["order_id"]
-    result = payment_result(order_id, simulate_payment(order_id, settings))
-    # Redelivery of one immutable source event must recreate the same payment event.
-    # Different source events get distinct IDs, even when they refer to one order.
-    # Keep settings unchanged while orders are replayable: this is a simulator, not a ledger.
-    identity = json.dumps([order_id, event["event_id"]], ensure_ascii=False, separators=(",", ":"))
-    result["event_id"] = str(uuid5(NAMESPACE_URL, f"NT132-Kafka/PaymentResult/v2/{identity}"))
-    # Preserve the source's time so redelivery of the same InventoryResult is byte-stable.
-    result["timestamp"] = event["timestamp"]
+    result = load_or_create_decision(conn, event, settings, simulate_payment)
+    # Quyết định đã COMMIT. Lỗi enqueue/delivery không làm đổi quyết định này.
     publish_payment(producer, result, timeout=settings.delivery_timeout)
-    logger.info(
-        "PaymentResult delivered event_id=%s order_id=%s success=%s",
-        result["event_id"], order_id, result["data"]["success"],
-    )
+    logger.info("Payment delivered event_id=%s order_id=%s success=%s",
+                result["event_id"], result["data"]["order_id"],
+                result["data"]["success"])
     return {"skipped": False, "payment_event": result}
 
 
-def consume_one_message(consumer, producer, message, settings=None):
+def consume_one_message(consumer, producer, message, settings=None, *, conn):
     if message.error():
         raise KafkaException(message.error())
     if message.topic() != TOPIC_INVENTORY_RESULTS:
-        raise ValueError("Payment received an unexpected topic")
-    result = process_event(producer, deserialize_event(message), settings)
+        raise ValueError("Unexpected Payment topic")
+    result = process_event(producer, deserialize_event(message), settings, conn=conn)
     commit_message(consumer, message)
     return result
 
 
-def run_consumer(consumer=None, producer=None, settings=None, stop_after=None):
+def run_consumer(consumer=None, producer=None, settings=None, stop_after=None,
+                 conn=None):
     settings = settings if settings is not None else PaymentSettings.from_env()
-    owns_consumer = consumer is None
-    owns_producer = producer is None
-    count = 0
+    owns_consumer, owns_producer, owns_conn = (
+        consumer is None, producer is None, conn is None)
     try:
+        if owns_conn:
+            conn = get_connection()
         if owns_consumer:
             consumer = create_consumer(
                 GROUP_PAYMENT,
-                config_overrides={"enable.auto.commit": False, "enable.auto.offset.store": False},
+                config_overrides={"enable.auto.commit": False,
+                                  "enable.auto.offset.store": False},
             )
         if owns_producer:
             producer = create_producer()
         consumer.subscribe([TOPIC_INVENTORY_RESULTS])
+        count = 0
         while stop_after is None or count < stop_after:
             message = consumer.poll(1.0)
             if message is None:
                 continue
-            # Let errors stop the loop. Processing later offsets could skip a failed event.
-            consume_one_message(consumer, producer, message, settings)
+            consume_one_message(consumer, producer, message, settings, conn=conn)
             count += 1
     finally:
-        if owns_consumer and consumer is not None:
-            consumer.close()
-        if owns_producer and producer is not None:
-            pending = producer.flush(5.0)
-            if pending:
-                logger.warning("Payment stopped with %s unconfirmed Kafka message(s)", pending)
+        try:
+            if owns_consumer and consumer is not None:
+                consumer.close()
+        finally:
+            try:
+                if owns_producer and producer is not None:
+                    pending = producer.flush(5)
+                    if pending:
+                        logger.warning("Payment stopped with %s pending messages", pending)
+            finally:
+                if owns_conn and conn is not None:
+                    conn.close()
 
 
 def main():

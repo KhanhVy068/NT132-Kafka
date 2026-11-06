@@ -12,10 +12,29 @@ from common.event_schema import inventory_result, payment_result
 from common.kafka_client import serialize_event
 from config.topics import TOPIC_INVENTORY_RESULTS, TOPIC_PAYMENTS_RESULTS
 from services.payment.consumer import (
-    consume_one_message, process_event, run_consumer, simulate_payment,
+    consume_one_message as _consume_one_message, process_event as _process_event,
+    run_consumer as _run_consumer, simulate_payment,
 )
 from services.payment.producer import publish_payment
 from services.payment.settings import PaymentSettings
+
+
+_UNIT_CONN = object()
+
+
+def process_event(*args, **kwargs):
+    kwargs.setdefault("conn", _UNIT_CONN)
+    return _process_event(*args, **kwargs)
+
+
+def consume_one_message(*args, **kwargs):
+    kwargs.setdefault("conn", _UNIT_CONN)
+    return _consume_one_message(*args, **kwargs)
+
+
+def run_consumer(*args, **kwargs):
+    kwargs.setdefault("conn", _UNIT_CONN)
+    return _run_consumer(*args, **kwargs)
 
 
 class FakeMessage:
@@ -56,7 +75,27 @@ class FakeProducer:
 
 class PaymentTests(unittest.TestCase):
     def setUp(self):
+        from copy import deepcopy
+        from uuid import NAMESPACE_URL, uuid5
+        from common.event_schema import payment_result
         self.event = inventory_result("ORD-1", "P01", True)
+        self.decisions = {}
+
+        def load(conn, source, settings, decide):
+            order_id = source["data"]["order_id"]
+            if order_id not in self.decisions:
+                result = payment_result(order_id, decide(order_id, settings))
+                identity = json.dumps([order_id, source["event_id"]],
+                                      ensure_ascii=False, separators=(",", ":"))
+                result["event_id"] = str(uuid5(
+                    NAMESPACE_URL, f"NT132-Kafka/PaymentResult/v2/{identity}"))
+                result["timestamp"] = source["timestamp"]
+                self.decisions[order_id] = result
+            return deepcopy(self.decisions[order_id])
+
+        patcher = patch("services.payment.consumer.load_or_create_decision", side_effect=load)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_rejected_inventory_does_not_publish_payment_but_commits(self):
         consumer, producer = Mock(), FakeProducer()
@@ -71,6 +110,7 @@ class PaymentTests(unittest.TestCase):
     def test_forced_success_and_failure(self):
         for mode, expected in [("success", True), ("failure", False)]:
             with self.subTest(mode=mode):
+                self.decisions.clear()
                 producer = FakeProducer()
                 result = process_event(producer, self.event, PaymentSettings(mode=mode))
                 self.assertIs(result["payment_event"]["data"]["success"], expected)
@@ -85,21 +125,20 @@ class PaymentTests(unittest.TestCase):
         second_source = inventory_result("ORD-1", "P01", True)
         repeated_order = process_event(FakeProducer(), second_source, settings)["payment_event"]
         self.assertEqual(first, replay)
-        self.assertNotEqual(first["event_id"], repeated_order["event_id"])
+        self.assertEqual(first["event_id"], repeated_order["event_id"])
         self.assertEqual(first["data"], repeated_order["data"])
 
-    def test_distinct_source_times_keep_output_event_ids_immutable(self):
-        settings = PaymentSettings(mode="failure")
-        self.event["timestamp"] = "2026-11-03T00:00:00+00:00"
-        next_source = inventory_result("ORD-1", "P01", True)
-        next_source["timestamp"] = "2026-11-04T00:00:00+00:00"
-        first = process_event(FakeProducer(), self.event, settings)["payment_event"]
-        second = process_event(FakeProducer(), next_source, settings)["payment_event"]
-        self.assertEqual(first["data"], second["data"])
-        self.assertNotEqual(first["timestamp"], second["timestamp"])
-        self.assertNotEqual(first["event_id"], second["event_id"])
-        self.assertEqual(first, process_event(FakeProducer(), self.event, settings)["payment_event"])
-        self.assertEqual(second, process_event(FakeProducer(), next_source, settings)["payment_event"])
+    def test_same_order_keeps_first_canonical_decision_across_modes_and_sources(self):
+        first = process_event(FakeProducer(), self.event,
+                              PaymentSettings(mode="success"))["payment_event"]
+        second_source = inventory_result("ORD-1", "P01", True)
+        second = process_event(FakeProducer(), second_source,
+                               PaymentSettings(mode="failure"))["payment_event"]
+        replay = process_event(FakeProducer(), self.event,
+                               PaymentSettings(mode="failure"))["payment_event"]
+        self.assertEqual(first, second)
+        self.assertEqual(first, replay)
+        self.assertTrue(first["data"]["success"])
 
     def test_result_is_stable_across_fresh_processes_and_python_hash_seeds(self):
         code = (

@@ -166,7 +166,8 @@ class StockViewTests(unittest.TestCase):
     def test_versionless_tv3_event_is_rejected_before_database_or_offset_commit(self):
         conn = FakeConnection()
         consumer = Mock()
-        legacy = stock_updated("P01", 10)
+        legacy = stock_updated("P01", 10, version=0)
+        del legacy["data"]["version"]
         with self.assertRaisesRegex(ValueError, "TV3 must publish"):
             consume_one_message(consumer, conn, message_for(legacy))
         self.assertEqual(conn.calls, [])

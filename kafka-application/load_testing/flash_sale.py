@@ -61,7 +61,7 @@ def _validate_options(count, product_id, quantity, rate, run_id,
 def run_flash_sale(*, count, product_id, quantity=1, rate=0.0, run_id=None,
                    queue_timeout=15.0, flush_timeout=30.0, producer=None,
                    monotonic=time.monotonic, sleep=time.sleep,
-                   utc_now=None):
+                   utc_now=None, stop_event=None):
     """Send without waiting per delivery; poll and flush serve callbacks.
 
     ``rate=0`` means unlimited. A queue timeout fails the current order and
@@ -105,11 +105,19 @@ def run_flash_sale(*, count, product_id, quantity=1, rate=0.0, run_id=None,
 
     try:
         for order_number in range(1, count + 1):
+            if stop_event is not None and stop_event.is_set():
+                interrupted = True
+                break
             if rate:
                 target = started + (order_number - 1) / rate
                 while monotonic() < target:
+                    if stop_event is not None and stop_event.is_set():
+                        interrupted = True
+                        break
                     producer.poll(0)
                     sleep(max(0.0, min(0.05, target - monotonic())))
+                if interrupted:
+                    break
 
             event = create_order(product_id, quantity,
                                  order_id=f"ORD-{run_id}-{order_number}")
@@ -118,6 +126,10 @@ def run_flash_sale(*, count, product_id, quantity=1, rate=0.0, run_id=None,
             queue_deadline = monotonic() + queue_timeout
             queue_expired = False
             while True:
+                if stop_event is not None and stop_event.is_set():
+                    pending.remove(order_number)
+                    interrupted = True
+                    break
                 try:
                     producer.produce(
                         topic=TOPIC_ORDERS,
@@ -143,7 +155,7 @@ def run_flash_sale(*, count, product_id, quantity=1, rate=0.0, run_id=None,
                     counters["submitted"] += 1
                     break
             producer.poll(0)
-            if queue_expired:
+            if queue_expired or interrupted:
                 break
     except KeyboardInterrupt:
         interrupted = True

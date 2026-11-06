@@ -40,7 +40,10 @@ class PostgreSQLTestCase(unittest.TestCase):
             raise ValueError("STOCK_VIEW_TEST_DSN is not valid libpq connection information") from None
         name = settings.get("dbname", "")
         forbidden = {
-            "inventory_db", "stock_view_db", "postgres", "template0", "template1",
+            "inventory_db", "stock_view_db", "payment_db", "notification_db",
+            "postgres", "template0", "template1",
+            os.getenv("PAYMENT_DB_NAME", "payment_db"),
+            os.getenv("NOTIFICATION_DB_NAME", "notification_db"),
             os.getenv("INVENTORY_DB_NAME", "inventory_db"),
             os.getenv("STOCK_VIEW_DB_NAME", "stock_view_db"),
         }
@@ -158,8 +161,10 @@ class PostgreSQLStockViewTests(PostgreSQLTestCase):
         self.assertEqual(self.processed_count(), 4)
 
     def test_legacy_tv3_stock_event_is_a_visible_contract_failure(self):
+        legacy = stock_updated("P01", 10, version=0)
+        del legacy["data"]["version"]
         with self.assertRaisesRegex(ValueError, "TV3 must publish"):
-            process_event(self.admin, stock_updated("P01", 10))
+            process_event(self.admin, legacy)
         self.assertIsNone(self.stock())
         self.assertEqual(self.processed_count(), 0)
 
@@ -167,7 +172,7 @@ class PostgreSQLStockViewTests(PostgreSQLTestCase):
 class PostgreSQLComponentTests(PostgreSQLTestCase):
     """Native TV3 code + TV4 Payment + projection; Kafka is replaced by ack fake.
 
-    Two schemas in the dedicated TEST database isolate the test components.
+    Three schemas in the dedicated TEST database isolate the test components.
     Actual services must still run with separate databases and separate accounts.
     """
 
@@ -181,6 +186,15 @@ class PostgreSQLComponentTests(PostgreSQLTestCase):
         self.inventory = self.inventory_connection()
         self.addCleanup(self.inventory.close)
         init_inventory(self.inventory)
+        from services.payment.database import init_db as init_payment
+        self.payment_schema = f"tv4_payment_test_{uuid4().hex}"
+        self.admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(self.payment_schema)))
+        self.addCleanup(lambda: self.admin.execute(
+            sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(self.payment_schema))))
+        self.payment = self.connect_test_database()
+        self.addCleanup(self.payment.close)
+        self.payment.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(self.payment_schema)))
+        init_payment(self.payment)
 
     def drop_inventory_schema(self):
         self.admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(self.inventory_schema)))
@@ -205,7 +219,7 @@ class PostgreSQLComponentTests(PostgreSQLTestCase):
             "SELECT payload FROM outbox_events WHERE topic = %s AND message_key = %s",
             ("inventory.results", "component-failure"),
         ).fetchone()["payload"]
-        payment = payment_process(AcknowledgingProducer(), inventory_result, PaymentSettings(mode="failure"))
+        payment = payment_process(AcknowledgingProducer(), inventory_result, PaymentSettings(mode="failure"), conn=self.payment)
         self.assertFalse(payment["payment_event"]["data"]["success"])
         released = inventory_process(self.inventory, payment["payment_event"], "payments.results")
         self.assertTrue(released["result"]["released"])
@@ -216,22 +230,16 @@ class PostgreSQLComponentTests(PostgreSQLTestCase):
             "SELECT payload FROM outbox_events WHERE topic = %s ORDER BY id", ("inventory.updated",),
         ).fetchall()]
 
-    def test_native_tv3_failure_flow_exposes_missing_version_contract(self):
+    def test_native_tv3_failure_flow_has_versions(self):
         events = self.failed_payment_flow()
-        self.assertEqual(len(events), 3)
-        missing_version = [event for event in events if "version" not in event["data"]]
-        if not missing_version:
-            self.skipTest("TV3 now emits version; native versioned component test covers this flow")
-        for payload in missing_version:
-            with self.assertRaisesRegex(ValueError, "TV3 must publish"):
-                process_event(self.admin, payload)
-        self.assertEqual(self.processed_count(), 0)
-        self.assertIsNone(self.stock())
+        self.assertEqual([event["data"]["version"] for event in events], [0, 1, 2])
+        for payload in events:
+            process_event(self.admin, payload)
+        self.assertEqual(self.stock(), {"stock_after": 10, "version": 2})
 
     def test_native_versioned_reserve_payment_failure_release_projection(self):
         events = self.failed_payment_flow()
-        if any("version" not in event["data"] for event in events):
-            self.skipTest("TV3 StockUpdated outbox omits version; native Stock View integration requires TV3 contract fix")
+        self.assertTrue(all("version" in event["data"] for event in events))
         for payload in events:
             process_event(self.admin, payload)
         self.assertEqual(self.stock(), {"stock_after": 10, "version": 2})
@@ -254,7 +262,11 @@ class PostgreSQLComponentTests(PostgreSQLTestCase):
                     "SELECT payload FROM outbox_events WHERE topic = %s AND message_key = %s",
                     ("inventory.results", order_id),
                 ).fetchone()["payload"]
-                payment = payment_process(AcknowledgingProducer(), response, PaymentSettings(mode="success"))
+                with self.connect_test_database() as payment_connection:
+                    payment_connection.execute(sql.SQL("SET search_path TO {}").format(
+                        sql.Identifier(self.payment_schema)))
+                    payment = payment_process(AcknowledgingProducer(), response,
+                                              PaymentSettings(mode="success"), conn=payment_connection)
                 if result["result"]["success"]:
                     self.assertTrue(payment["payment_event"]["data"]["success"])
                     inventory_process(conn, payment["payment_event"], "payments.results")
